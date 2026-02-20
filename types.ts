@@ -1,5 +1,4 @@
 
-import { Type } from "@google/genai";
 import { ShieldCheck, Terminal, Activity, ClipboardList } from 'lucide-react';
 
 export enum TaskStatus {
@@ -133,22 +132,4 @@ export interface Organization {
   createdAt: number;
 }
 
-// Gemini Response Schema
-export const AnalysisSchema = {
-  type: Type.OBJECT,
-  properties: {
-    title: { type: Type.STRING, description: "A concise, executive summary title of the task." },
-    description: { type: Type.STRING, description: "A brief strategic description." },
-    impactScore: { type: Type.NUMBER, description: "Rating 1-10 on potential value/profit generated." },
-    effortScore: { type: Type.NUMBER, description: "Rating 1-10 on complexity and time cost." },
-    strategicAdvice: { type: Type.STRING, description: "One sentence of ruthless advice (e.g., 'Delegate this', 'Do immediately')." },
-    subTasks: {
-      type: Type.ARRAY,
-      items: {
-        type: Type.STRING,
-        description: "Actionable step."
-      }
-    }
-  },
-  required: ["title", "description", "impactScore", "effortScore", "strategicAdvice", "subTasks"],
-};
+// 注意：AnalysisSchema 已移除，现在使用 Qwen API，通过 prompt 约束返回格式

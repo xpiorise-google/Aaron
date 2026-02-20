@@ -2,6 +2,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Organization, UserProfile } from '../types';
 import { getOrganization, createOrganization, initDatabase } from '../services/databaseService';
+import { queryDepartments, Department } from '../services/departmentApi';
+import { queryUsers, ApiUser } from '../services/userApi';
 import { ChevronRight, ArrowLeft, Loader2, KeyRound, Shield } from 'lucide-react';
 import EntropyCube from './EntropyCube';
 
@@ -159,7 +161,7 @@ const Login: React.FC<LoginProps> = ({ onLogin, isDarkMode, toggleTheme }) => {
     initDatabase();
   }, []);
 
-  const handleOrgSubmit = (e: React.FormEvent) => {
+  const handleOrgSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     const id = orgIdInput.toUpperCase().trim();
@@ -170,7 +172,107 @@ const Login: React.FC<LoginProps> = ({ onLogin, isDarkMode, toggleTheme }) => {
     }
 
     setLoading(true);
-    setTimeout(() => {
+    try {
+      // 首先尝试从后端 API 查询机构
+      // 1. 查询所有部门，根据 parent_id 查找匹配的机构
+      const departmentsResponse = await queryDepartments();
+      const departments = Array.isArray(departmentsResponse?.data) ? departmentsResponse.data : [];
+      
+      // 查找匹配的部门：根据 parent_id 查询（输入的 orgId 作为 parent_id）
+      // parent_id 可能是字符串或数字，需要支持两种匹配方式
+      let matchedDepartment: Department | undefined = undefined;
+      
+      // 方式1：直接字符串匹配 parent_id
+      matchedDepartment = departments.find(d => {
+        if (d.parent_id === null || d.parent_id === undefined) return false;
+        // 支持字符串和数字类型的 parent_id
+        return d.parent_id.toString().toUpperCase() === id || 
+               d.parent_id.toString() === id ||
+               (typeof d.parent_id === 'number' && d.parent_id.toString() === id);
+      });
+      
+      // 方式2：如果 parent_id 是数字，尝试数字匹配
+      if (!matchedDepartment) {
+        const orgIdAsNumber = parseInt(id, 10);
+        if (!isNaN(orgIdAsNumber)) {
+          matchedDepartment = departments.find(d => 
+            d.parent_id !== null && 
+            d.parent_id !== undefined &&
+            (d.parent_id === orgIdAsNumber || 
+             (typeof d.parent_id === 'string' && parseInt(d.parent_id, 10) === orgIdAsNumber))
+          );
+        }
+      }
+      
+      // 方式3：如果通过 parent_id 没找到，尝试通过 department_name 匹配（作为备用）
+      if (!matchedDepartment) {
+        matchedDepartment = departments.find(d => 
+          d.department_name?.toUpperCase() === id
+        );
+      }
+      
+      // 如果找到匹配的部门，查询该部门的用户
+      if (matchedDepartment) {
+        try {
+          const usersResponse = await queryUsers();
+          const allUsers = Array.isArray(usersResponse?.data) ? usersResponse.data : [];
+          
+          // 筛选出该部门所属的用户（根据 department_id 匹配）
+          const departmentUsers = allUsers.filter(user => {
+            if (user.department_id === null || user.department_id === undefined) return false;
+            // 支持字符串和数字类型的 department_id 匹配
+            return user.department_id.toString() === matchedDepartment!.id.toString() || 
+                   user.department_id === matchedDepartment!.id ||
+                   (typeof user.department_id === 'string' && 
+                    typeof matchedDepartment!.id === 'number' && 
+                    parseInt(user.department_id, 10) === matchedDepartment!.id) ||
+                   (typeof user.department_id === 'number' && 
+                    typeof matchedDepartment!.id === 'string' && 
+                    user.department_id === parseInt(matchedDepartment!.id, 10));
+          });
+          
+          // 将 API 用户转换为前端的 UserProfile 格式
+          const userProfiles: UserProfile[] = departmentUsers.map(user => ({
+            id: user.username,
+            name: user.display_name || user.username,
+            role: user.role,
+            password: user.password,
+            avatarColor: `hsl(${(user.id * 137.508) % 360}, 70%, 50%)`, // 生成颜色
+            isAdmin: false, // 可以根据需要判断
+          }));
+          
+          // 如果找到用户，创建临时 Organization 对象用于显示
+          if (userProfiles.length > 0) {
+            const tempOrg: Organization = {
+              id: id,
+              name: matchedDepartment.department_name,
+              adminId: userProfiles[0]?.id || '',
+              users: userProfiles,
+              createdAt: Date.now(),
+            };
+            
+            setActiveOrg(tempOrg);
+            setStep('USER_SELECTION');
+            setLoading(false);
+            return;
+          } else {
+            // 找到部门但没有用户，提示用户创建
+            console.warn(`找到机构 ${matchedDepartment.department_name}，但没有找到用户`);
+            setError('NO USERS FOUND');
+            setStep('CREATE_ORG');
+            setLoading(false);
+            return;
+          }
+        } catch (userError) {
+          console.error('查询用户失败:', userError);
+          // 如果查询用户失败，仍然可以显示部门信息，但提示错误
+          setError('USER_QUERY_FAILED');
+          setLoading(false);
+          // 继续执行，回退到本地数据库查询
+        }
+      }
+      
+      // 如果后端没有找到，尝试从本地数据库查找
       const org = getOrganization(id);
       if (org) {
         setActiveOrg(org);
@@ -179,7 +281,18 @@ const Login: React.FC<LoginProps> = ({ onLogin, isDarkMode, toggleTheme }) => {
         setStep('CREATE_ORG');
       }
       setLoading(false);
-    }, 500);
+    } catch (error) {
+      console.error('查询机构失败:', error);
+      // 如果 API 调用失败，回退到本地数据库查询
+      const org = getOrganization(id);
+      if (org) {
+        setActiveOrg(org);
+        setStep('USER_SELECTION');
+      } else {
+        setStep('CREATE_ORG');
+      }
+      setLoading(false);
+    }
   };
 
   const handleCreateOrg = (e: React.FormEvent) => {
