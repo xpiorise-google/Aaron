@@ -18,7 +18,7 @@ import {
 interface DashboardOverviewProps {
   tasks: Task[]; // The active/filtered tasks
   allTasks: Task[]; // Full history for heatmap
-  projects: Project[]; // Available projects
+  projects?: Project[]; // Available projects
   onUpdateStatus: (id: string, status: TaskStatus) => void;
   onEdit: (task: Task) => void;
   hoveredTaskIds: string[];
@@ -29,7 +29,7 @@ interface DashboardOverviewProps {
 const DashboardOverview: React.FC<DashboardOverviewProps> = ({ 
   tasks,
   allTasks,
-  projects,
+  projects = [],
   onUpdateStatus, 
   onEdit,
   hoveredTaskIds,

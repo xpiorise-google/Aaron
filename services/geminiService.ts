@@ -1,8 +1,20 @@
 import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 import { AnalysisSchema, Task, UserContext } from "../types";
 
-// Initialize Gemini Client
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// Lazy initialization of Gemini Client
+let ai: GoogleGenAI | null = null;
+
+const getAI = (): GoogleGenAI | null => {
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) {
+    console.warn("GEMINI_API_KEY is not set. AI features will be disabled.");
+    return null;
+  }
+  if (!ai) {
+    ai = new GoogleGenAI({ apiKey });
+  }
+  return ai;
+};
 
 const ContextSchema = {
   type: Type.OBJECT,
@@ -56,8 +68,21 @@ export const analyzeTaskInitiative = async (rawInput: string, context?: UserCont
     请务必无情。低价值的任务必须给低影响力分。所有文本内容请使用中文。
   `;
 
+  const client = getAI();
+  if (!client) {
+    // Fallback when API key is not set
+    return {
+      title: rawInput,
+      description: "手动输入 (API Key 未配置)",
+      impactScore: 5,
+      effortScore: 5,
+      strategicAdvice: "请谨慎推进。",
+      subTasks: []
+    };
+  }
+
   try {
-    const response = await ai.models.generateContent({
+    const response = await client.models.generateContent({
       model: modelId,
       contents: prompt,
       config: {
@@ -116,8 +141,22 @@ export const generateStrategicContext = async (jobTitle: string): Promise<Partia
     请使用中文回答，确保内容专业、具体且符合该职位的层级。
   `;
 
+  const client = getAI();
+  if (!client) {
+    // Fallback when API key is not set
+    return {
+      reportingTo: "上级主管",
+      quarterlyGoal: "提升业务核心指标",
+      annualGoal: "实现可持续增长",
+      directTeamSize: 5,
+      directTeamSkills: "执行力, 沟通",
+      collabTeamSize: 10,
+      collabTeamSkills: "行政支持, 技术支持"
+    };
+  }
+
   try {
-    const response = await ai.models.generateContent({
+    const response = await client.models.generateContent({
       model: modelId,
       contents: prompt,
       config: {

@@ -791,6 +791,7 @@ const App: React.FC = () => {
                 <DashboardOverview 
                   tasks={filteredTasks}
                   allTasks={tasks}
+                  projects={projects}
                   onUpdateStatus={handleUpdateStatus}
                   onEdit={setEditingTask}
                   hoveredTaskIds={hoveredTaskIds}

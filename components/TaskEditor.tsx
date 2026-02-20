@@ -3,7 +3,68 @@ import { Task, SubTask } from '../types';
 import { Project } from '../types';
 import { X, Plus, Save, Trash2, Sliders, ListTodo, GripVertical, Briefcase, Eye, EyeOff } from 'lucide-react';
 
-// ... (existing code)
+interface TaskEditorProps {
+  task: Task;
+  projects: Project[];
+  onSave: (task: Task) => void;
+  onCancel: () => void;
+}
+
+const TaskEditor: React.FC<TaskEditorProps> = ({ task, projects, onSave, onCancel }) => {
+  const [editedTask, setEditedTask] = useState<Task>({ ...task });
+  const dragItem = useRef<number | null>(null);
+  const dragOverItem = useRef<number | null>(null);
+
+  const addSubtask = () => {
+    const newSubtask: SubTask = {
+      id: Date.now().toString(),
+      title: '',
+      completed: false,
+    };
+    setEditedTask(prev => ({
+      ...prev,
+      subTasks: [...prev.subTasks, newSubtask]
+    }));
+  };
+
+  const deleteSubtask = (id: string) => {
+    setEditedTask(prev => ({
+      ...prev,
+      subTasks: prev.subTasks.filter(st => st.id !== id)
+    }));
+  };
+
+  const handleSubtaskChange = (id: string, value: string) => {
+    setEditedTask(prev => ({
+      ...prev,
+      subTasks: prev.subTasks.map(st => st.id === id ? { ...st, title: value } : st)
+    }));
+  };
+
+  const handleDragStart = (e: React.DragEvent, position: number) => {
+    dragItem.current = position;
+  };
+
+  const handleDragEnter = (e: React.DragEvent, position: number) => {
+    dragOverItem.current = position;
+  };
+
+  const handleDragEnd = () => {
+    if (dragItem.current === null || dragOverItem.current === null) return;
+    
+    const copyListItems = [...editedTask.subTasks];
+    const dragItemContent = copyListItems[dragItem.current];
+    copyListItems.splice(dragItem.current, 1);
+    copyListItems.splice(dragOverItem.current, 0, dragItemContent);
+    
+    dragItem.current = null;
+    dragOverItem.current = null;
+    
+    setEditedTask(prev => ({
+      ...prev,
+      subTasks: copyListItems
+    }));
+  };
 
   const handleToggleShare = () => {
     setEditedTask(prev => ({ ...prev, isSharedToTeam: !prev.isSharedToTeam }));
