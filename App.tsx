@@ -1,8 +1,11 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Task, TaskStatus, UserContext, TeamMember, HandoverRecord, HandoverStatus } from './types';
+import { Task, TaskStatus, UserContext, TeamMember, HandoverRecord, HandoverStatus, SubTask } from './types';
 import { analyzeTaskInitiative } from './services/geminiService';
 import { getUserTasks, saveUserTasks, getUserContext, saveUserContext, pushTaskToColleague, respondToHandover, getAllTeamMembers, archiveHandover, clearAllArchivedHandovers, archiveSenderHandover, clearAllSenderArchivedHandovers, getSharedTasks, shareTaskToTeam, unshareTaskFromTeam, getProjects, saveProject, deleteProject } from './services/databaseService';
+import { queryTasks, addTask, updateTask, deleteTask, apiTaskToTask, taskToAddTaskParams, taskToUpdateTaskParams } from './services/taskApi';
+import { queryUserByUsername, queryUsers } from './services/userApi';
+import { addStep, updateStep, deleteStep, subTaskToAddStepParams, subTaskToUpdateStepParams } from './services/stepApi';
 import ExecutiveCard from './components/ExecutiveCard';
 import ExecutiveListView from './components/ExecutiveListView';
 import DashboardOverview from './components/DashboardOverview'; 
@@ -46,6 +49,7 @@ const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<string | null>(null);
   const [currentOrgId, setCurrentOrgId] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
+  const [currentUserApiId, setCurrentUserApiId] = useState<number | null>(null); // 当前用户的 API ID
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [sharedTasks, setSharedTasks] = useState<Task[]>([]); // Team Dashboard Tasks
@@ -120,7 +124,7 @@ const App: React.FC = () => {
     }
   }, [currentUser, currentOrgId, showContextEditor, showOrgManager]); 
 
-  const handleLogin = (username: string, orgId: string, admin: boolean) => {
+  const handleLogin = async (username: string, orgId: string, admin: boolean) => {
     setCurrentUser(username);
     setCurrentOrgId(orgId);
     setIsAdmin(admin);
@@ -129,8 +133,53 @@ const App: React.FC = () => {
     localStorage.setItem('executive_session_org_id', orgId);
     localStorage.setItem('executive_session_is_admin', String(admin));
 
-    // Force data load with Org ID scoping
-    const userTasks = getUserTasks(username, orgId);
+    // 查询用户 API ID
+    let userApiId: number | null = null;
+    try {
+      const userResponse = await queryUserByUsername(username);
+      const users = Array.isArray(userResponse?.data) ? userResponse.data : [];
+      if (users.length > 0) {
+        userApiId = users[0].id;
+        setCurrentUserApiId(userApiId);
+      }
+    } catch (error) {
+      console.warn('查询用户 API ID 失败，将使用本地存储:', error);
+    }
+
+    // 加载任务列表：优先从后端 API 加载
+    try {
+      // 先查询所有用户，创建完整的用户 ID 映射
+      const allUsersResponse = await queryUsers();
+      const allUsers = Array.isArray(allUsersResponse?.data) ? allUsersResponse.data : [];
+      const usernameById = new Map<number, string>();
+      allUsers.forEach(user => {
+        usernameById.set(user.id, user.username);
+      });
+      
+      // 查询所有任务
+      const tasksResponse = await queryTasks();
+      const apiTasks = Array.isArray(tasksResponse?.data) ? tasksResponse.data : [];
+      
+      // 将 API 任务转换为前端 Task 格式
+      const convertedTasks: (Task & { _apiId?: number })[] = [];
+      for (const apiTask of apiTasks) {
+        try {
+          const task = await apiTaskToTask(apiTask, usernameById);
+          convertedTasks.push(task);
+        } catch (error) {
+          console.error(`转换任务 ${apiTask.id} 失败:`, error);
+        }
+      }
+      
+      setTasks(convertedTasks);
+    } catch (error) {
+      console.warn('从后端加载任务失败，使用本地存储:', error);
+      // 回退到本地存储
+      const userTasks = getUserTasks(username, orgId);
+      setTasks(userTasks);
+    }
+
+    // 加载其他数据（保持本地存储）
     const context = getUserContext(username, orgId);
     const teamTasks = getSharedTasks(orgId);
     const teamProjects = getProjects(orgId);
@@ -139,7 +188,6 @@ const App: React.FC = () => {
     const lastSeen = localStorage.getItem(`executive_collab_last_seen_${orgId}_${username}`);
     setLastSeenCollabTime(lastSeen ? parseInt(lastSeen) : 0);
 
-    setTasks(userTasks);
     setSharedTasks(teamTasks);
     setProjects(teamProjects);
     setUserContext(context);
@@ -197,28 +245,74 @@ const App: React.FC = () => {
     if (!inputValue.trim()) return;
 
     setIsAnalyzing(true);
-    const analysis = await analyzeTaskInitiative(inputValue, userContext || undefined);
-    
-    const newTask: Task = {
-      id: crypto.randomUUID(),
-      originalInput: inputValue,
-      title: analysis.title || inputValue,
-      description: analysis.description || '',
-      impactScore: analysis.impactScore || 5,
-      effortScore: analysis.effortScore || 5,
-      strategicAdvice: analysis.strategicAdvice || '',
-      subTasks: analysis.subTasks || [],
-      status: TaskStatus.PROPOSED,
-      createdAt: Date.now(),
-      tags: [],
-      attachments: [],
-      isMasked: false
-    };
+    try {
+      const analysis = await analyzeTaskInitiative(inputValue, userContext || undefined);
+      
+      const newTask: Task = {
+        id: crypto.randomUUID(),
+        originalInput: inputValue,
+        title: analysis.title || inputValue,
+        description: analysis.description || '',
+        impactScore: analysis.impactScore || 5,
+        effortScore: analysis.effortScore || 5,
+        strategicAdvice: analysis.strategicAdvice || '',
+        subTasks: analysis.subTasks || [],
+        status: TaskStatus.PROPOSED,
+        createdAt: Date.now(),
+        tags: [],
+        attachments: [],
+        isMasked: false
+      };
 
-    const newTaskList = [newTask, ...tasks];
-    updateTasks(newTaskList);
-    setInputValue('');
-    setIsAnalyzing(false);
+      // 如果用户有 API ID，调用后端接口添加任务
+      if (currentUserApiId) {
+        try {
+          const addParams = taskToAddTaskParams(newTask, currentUserApiId, currentUserApiId);
+          const addResponse = await addTask(addParams);
+          
+          // 如果添加成功，将返回的任务转换为前端格式并更新列表
+          if (addResponse.data && addResponse.code === 200) {
+            // 查询所有用户创建完整的用户映射
+            const allUsersResponse = await queryUsers();
+            const allUsers = Array.isArray(allUsersResponse?.data) ? allUsersResponse.data : [];
+            const usernameById = new Map<number, string>();
+            allUsers.forEach(user => {
+              usernameById.set(user.id, user.username);
+            });
+            
+            const apiTask = addResponse.data as any;
+            const convertedTask = await apiTaskToTask(apiTask, usernameById);
+            const newTaskList = [convertedTask, ...tasks];
+            setTasks(newTaskList);
+            
+            // 同时保存到本地存储（作为备份）
+            if (currentUser && currentOrgId) {
+              saveUserTasks(currentUser, newTaskList, currentOrgId);
+            }
+          } else {
+            // 如果后端添加失败，回退到本地存储
+            const newTaskList = [newTask, ...tasks];
+            updateTasks(newTaskList);
+          }
+        } catch (apiError) {
+          console.error('调用后端添加任务接口失败:', apiError);
+          // 回退到本地存储
+          const newTaskList = [newTask, ...tasks];
+          updateTasks(newTaskList);
+        }
+      } else {
+        // 如果没有 API ID，使用本地存储
+        const newTaskList = [newTask, ...tasks];
+        updateTasks(newTaskList);
+      }
+      
+      setInputValue('');
+    } catch (error) {
+      console.error('分析任务失败:', error);
+      setInputValue('');
+    } finally {
+      setIsAnalyzing(false);
+    }
   };
 
   const handleRespondToHandover = (taskId: string, status: HandoverStatus, message: string) => {
@@ -257,18 +351,40 @@ const App: React.FC = () => {
     }
   };
 
-  const handleUpdateStatus = (id: string, status: TaskStatus) => {
+  const handleUpdateStatus = async (id: string, status: TaskStatus) => {
+    const task = tasks.find(t => t.id === id);
+    if (!task) return;
+    
     const now = Date.now();
+    const updates: Partial<Task> = { status };
+    if (status === TaskStatus.IN_PROGRESS) {
+       if (!task.startedAt) updates.startedAt = now;
+       if (task.status === TaskStatus.COMPLETED) updates.completedAt = undefined;
+    } else if (status === TaskStatus.COMPLETED) {
+       updates.completedAt = now;
+    }
+    
+    const updatedTask = { ...task, ...updates };
+    
+    // 如果任务有 API ID，同步状态到后端
+    const taskWithApiId = task as Task & { _apiId?: number };
+    if (taskWithApiId._apiId && currentUserApiId) {
+      try {
+        const updateParams = taskToUpdateTaskParams(
+          updatedTask as Task & { _apiId?: number },
+          currentUserApiId,
+          currentUserApiId
+        );
+        await updateTask(updateParams);
+      } catch (error) {
+        console.error('更新任务状态失败:', error);
+        // 即使 API 调用失败，仍然更新本地状态
+      }
+    }
+    
     const newTaskList = tasks.map(t => {
       if (t.id === id) {
-        const updates: Partial<Task> = { status };
-        if (status === TaskStatus.IN_PROGRESS) {
-           if (!t.startedAt) updates.startedAt = now;
-           if (t.status === TaskStatus.COMPLETED) updates.completedAt = undefined;
-        } else if (status === TaskStatus.COMPLETED) {
-           updates.completedAt = now;
-        }
-        return { ...t, ...updates };
+        return updatedTask;
       }
       return t;
     });
@@ -337,21 +453,81 @@ const App: React.FC = () => {
     setTaskToComplete(null);
   };
 
-  const handlePermanentDelete = (taskId: string) => {
-    if (window.confirm('确定要彻底删除此任务吗？此操作无法撤销。')) {
-      const newTaskList = tasks.filter(t => t.id !== taskId);
-      updateTasks(newTaskList);
+  const handlePermanentDelete = async (taskId: string) => {
+    if (!window.confirm('确定要彻底删除此任务吗？此操作无法撤销。')) {
+      return;
     }
+    
+    const task = tasks.find(t => t.id === taskId);
+    if (!task) return;
+    
+    // 如果任务有 API ID，调用后端删除接口
+    const taskWithApiId = task as Task & { _apiId?: number };
+    if (taskWithApiId._apiId) {
+      try {
+        await deleteTask({ id: taskWithApiId._apiId });
+      } catch (error) {
+        console.error('删除任务失败:', error);
+        // 即使 API 调用失败，仍然删除本地任务
+      }
+    }
+    
+    const newTaskList = tasks.filter(t => t.id !== taskId);
+    updateTasks(newTaskList);
   };
 
-  const handleClearAllDivested = () => {
-    if (window.confirm('确定要清空所有已放弃的任务吗？此操作无法撤销。')) {
-      const newTaskList = tasks.filter(t => t.status !== TaskStatus.DIVESTED);
-      updateTasks(newTaskList);
+  const handleClearAllDivested = async () => {
+    if (!window.confirm('确定要清空所有已放弃的任务吗？此操作无法撤销。')) {
+      return;
     }
+    
+    // 找出所有已放弃的任务
+    const divestedTasks = tasks.filter(t => t.status === TaskStatus.DIVESTED);
+    
+    // 如果任务有 API ID，调用后端删除接口
+    for (const task of divestedTasks) {
+      const taskWithApiId = task as Task & { _apiId?: number };
+      if (taskWithApiId._apiId) {
+        try {
+          await deleteTask({ id: taskWithApiId._apiId });
+        } catch (error) {
+          console.error(`删除任务 ${taskWithApiId._apiId} 失败:`, error);
+          // 即使 API 调用失败，仍然删除本地任务
+        }
+      }
+    }
+    
+    const newTaskList = tasks.filter(t => t.status !== TaskStatus.DIVESTED);
+    updateTasks(newTaskList);
   };
 
-  const handleToggleSubtask = (taskId: string, subtaskId: string) => {
+  const handleToggleSubtask = async (taskId: string, subtaskId: string) => {
+    const task = tasks.find(t => t.id === taskId);
+    if (!task) return;
+    
+    const subtask = task.subTasks.find(st => st.id === subtaskId);
+    if (!subtask) return;
+    
+    // 如果任务有 API ID 且步骤有 API Step ID，同步到后端
+    const taskWithApiId = task as Task & { _apiId?: number };
+    const subtaskWithApiId = subtask as SubTask & { _apiStepId?: number };
+    
+    if (taskWithApiId._apiId && subtaskWithApiId._apiStepId != null) {
+      try {
+        const stepIndex = task.subTasks.findIndex(st => st.id === subtaskId);
+        const updatedSubtask = { ...subtask, completed: !subtask.completed };
+        const updateParams = subTaskToUpdateStepParams(
+          updatedSubtask as SubTask & { _apiStepId?: number },
+          taskWithApiId._apiId,
+          stepIndex
+        );
+        await updateStep(updateParams);
+      } catch (error) {
+        console.error('更新步骤完成状态失败:', error);
+        // 即使 API 调用失败，仍然更新本地状态
+      }
+    }
+    
     const newTaskList = tasks.map(t => {
       if (t.id !== taskId) return t;
       return {
@@ -362,7 +538,7 @@ const App: React.FC = () => {
     updateTasks(newTaskList);
   };
 
-  const handleSaveTask = (updatedTask: Task) => {
+  const handleSaveTask = async (updatedTask: Task) => {
     // Check if sharing status changed
     const originalTask = tasks.find(t => t.id === updatedTask.id);
     if (originalTask && originalTask.isSharedToTeam !== updatedTask.isSharedToTeam) {
@@ -379,7 +555,75 @@ const App: React.FC = () => {
        setSharedTasks(getSharedTasks(currentOrgId || undefined));
     }
 
-    const newTaskList = tasks.map(t => t.id === updatedTask.id ? updatedTask : t);
+    // 如果任务有 API ID，同步步骤到后端
+    const taskWithApiId = updatedTask as Task & { _apiId?: number };
+    let finalUpdatedTask = updatedTask;
+    
+    if (taskWithApiId._apiId && originalTask) {
+      try {
+        const originalSubTasks = (originalTask.subTasks || []) as (SubTask & { _apiStepId?: number })[];
+        const updatedSubTasks = [...(updatedTask.subTasks || [])] as (SubTask & { _apiStepId?: number })[];
+        
+        // 识别需要删除的步骤（在原始任务中存在，但在更新任务中不存在）
+        const deletedSteps = originalSubTasks.filter(originalStep => {
+          const hasApiStepId = originalStep._apiStepId != null;
+          const stillExists = updatedSubTasks.some(updatedStep => 
+            updatedStep._apiStepId === originalStep._apiStepId
+          );
+          return hasApiStepId && !stillExists;
+        });
+        
+        // 删除步骤
+        for (const step of deletedSteps) {
+          if (step._apiStepId != null) {
+            try {
+              await deleteStep({ id: step._apiStepId });
+            } catch (error) {
+              console.error(`删除步骤 ${step._apiStepId} 失败:`, error);
+            }
+          }
+        }
+        
+        // 识别需要更新和新增的步骤
+        for (let index = 0; index < updatedSubTasks.length; index++) {
+          const updatedStep = updatedSubTasks[index];
+          
+          if (updatedStep._apiStepId != null) {
+            // 更新现有步骤
+            try {
+              const updateParams = subTaskToUpdateStepParams(updatedStep, taskWithApiId._apiId, index);
+              await updateStep(updateParams);
+            } catch (error) {
+              console.error(`更新步骤 ${updatedStep._apiStepId} 失败:`, error);
+            }
+          } else {
+            // 新增步骤
+            try {
+              const addParams = subTaskToAddStepParams(updatedStep, taskWithApiId._apiId, index);
+              const addResponse = await addStep(addParams);
+              
+              // 如果添加成功，更新步骤的 _apiStepId
+              if (addResponse.data && addResponse.code === 200 && typeof addResponse.data === 'object' && 'id' in addResponse.data) {
+                const apiStep = addResponse.data as any;
+                updatedStep._apiStepId = apiStep.id;
+              }
+            } catch (error) {
+              console.error(`添加步骤失败:`, error);
+            }
+          }
+        }
+        
+        // 更新任务中的步骤列表（包含新添加的 _apiStepId）
+        finalUpdatedTask = {
+          ...updatedTask,
+          subTasks: updatedSubTasks
+        };
+      } catch (error) {
+        console.error('同步步骤到后端失败:', error);
+      }
+    }
+
+    const newTaskList = tasks.map(t => t.id === finalUpdatedTask.id ? finalUpdatedTask : t);
     updateTasks(newTaskList);
     setEditingTask(null);
   };

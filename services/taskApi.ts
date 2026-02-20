@@ -436,7 +436,7 @@ export function taskToAddTaskParams(
       : '',
     display_order: (task as any)._displayOrder ?? null,
     is_deleted: task.status === TaskStatus.DIVESTED,
-    deleted_at: null,
+    deleted_at: task.status === TaskStatus.DIVESTED ? now : null,
     created_at: now,
     updated_at: now,
   };
